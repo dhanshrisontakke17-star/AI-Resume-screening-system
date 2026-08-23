@@ -2,76 +2,49 @@ from pypdf import PdfReader
 from docx import Document
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import shutil
 import os
+import tempfile
+
+app = FastAPI()
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def extract_pdf(path):
-    reader = PdfReader(path)
-
-    text = ""
-    for page in reader.pages:
-        text += page.extract_text() or ""
-
-    return text
+    return "\n".join(
+        page.extract_text() or ""
+        for page in PdfReader(path).pages
+    )
 
 
 def extract_docx(path):
-    document = Document(path)
-
     return "\n".join(
-        paragraph.text
-        for paragraph in document.paragraphs
+        p.text for p in Document(path).paragraphs
     )
 
 
 def extract_resume(path):
-    if path.lower().endswith(".pdf"):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
         return extract_pdf(path)
-
-    if path.lower().endswith(".docx"):
+    if ext == ".docx":
         return extract_docx(path)
-
     raise ValueError("Only PDF and DOCX files are supported")
 
 
 def calculate_skill_match(resume_text, required_skills):
-    resume_text = resume_text.lower()
-
-    found = []
-    missing = []
-
-    for skill in required_skills:
-        if skill.lower() in resume_text:
-            found.append(skill)
-        else:
-            missing.append(skill)
-
-    if required_skills:
-        score = (len(found) / len(required_skills)) * 100
-    else:
-        score = 0
-
+    text = resume_text.lower()
+    found = [s for s in required_skills if s.lower() in text]
+    missing = [s for s in required_skills if s.lower() not in text]
+    score = round(len(found) / len(required_skills) * 100, 2) if required_skills else 0
     return score, found, missing
 
 
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-
 def semantic_similarity(resume, job_description):
-    resume_vector = model.encode([resume])
-    job_vector = model.encode([job_description])
-
-    similarity = cosine_similarity(
-        resume_vector,
-        job_vector
-    )[0][0]
-
-    return round(similarity * 100, 2)
-
-
-app = FastAPI()
+    vectors = model.encode([resume, job_description])
+    similarity = cosine_similarity([vectors[0]], [vectors[1]])[0][0]
+    return round(float(similarity) * 100, 2)
 
 
 @app.post("/screen")
@@ -79,29 +52,54 @@ async def screen_resume(
     resume: UploadFile = File(...),
     job_description: str = Form(...)
 ):
-    file_path = f"temp_{resume.filename}"
+    if not resume.filename.lower().endswith((".pdf", ".docx")):
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF and DOCX files are supported"
+        )
 
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(resume.file, buffer)
+    suffix = os.path.splitext(resume.filename)[1]
+
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=suffix
+    ) as temp:
+        file_path = temp.name
+        shutil.copyfileobj(resume.file, temp)
 
     try:
         resume_text = extract_resume(file_path)
 
-        similarity = semantic_similarity(
-            resume_text,
-            job_description
+        if not resume_text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="No text found in resume"
+            )
+
+        job_skills = [
+            "python",
+            "machine learning",
+            "sql",
+            "tensorflow",
+            "pandas"
+        ]
+
+        semantic_score = semantic_similarity(
+            resume_text, job_description
+        )
+
+        skill_score, found, missing = calculate_skill_match(
+            resume_text, job_skills
         )
 
         return {
             "candidate": resume.filename,
-            "semantic_score": similarity
+            "semantic_score": semantic_score,
+            "skill_match_score": skill_score,
+            "found_skills": found,
+            "missing_skills": missing
         }
 
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
-
-
-         
-               
-           
+        await resume.close()
