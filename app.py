@@ -1,27 +1,26 @@
 import streamlit as st
-import random
+from pypdf import PdfReader
+from docx import Document
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import os
+import tempfile
+
+
+st.set_page_config(
+    page_title="AI Resume Screening System",
+    layout="wide"
+)
 
 st.title("AI Resume Screening System")
 
-uploaded_file = st.file_uploader("Upload Resume", type=["pdf", "docx"])
+# Load model
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-if uploaded_file is not None:
-    score = random.randint(50, 100)
 
-    st.success(f"Uploaded: {uploaded_file.name}")
-    st.write("Resume Score: 85%")
-    st.write(f"Resume Score: {score}%")
-
-    if score >= 85:
-        st.success("✅ Good Resume")
-    elif score >= 70:
-        st.warning("🟡 Average Resume")
-    else:
-        st.error("❌ Poor Resume")
-
-else:
-    st.warning("Please upload your resume.")
-    model = SentenceTransformer("all-MiniLM-L6-v2")
+model = load_model()
 
 
 def extract_pdf(path):
@@ -29,21 +28,18 @@ def extract_pdf(path):
     text = ""
 
     for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text + "\n"
+        text += page.extract_text() or ""
 
     return text
 
 
 def extract_docx(path):
     document = Document(path)
-    text = ""
 
-    for paragraph in document.paragraphs:
-        text += paragraph.text + "\n"
-
-    return text
+    return "\n".join(
+        paragraph.text
+        for paragraph in document.paragraphs
+    )
 
 
 def extract_resume(path):
@@ -53,15 +49,13 @@ def extract_resume(path):
     elif path.lower().endswith(".docx"):
         return extract_docx(path)
 
-    else:
-        raise ValueError("Only PDF and DOCX files are supported")
+    return ""
 
 
 def get_skills(text):
     skills = [
         "python",
         "java",
-        "c++",
         "sql",
         "mysql",
         "mongodb",
@@ -80,7 +74,6 @@ def get_skills(text):
         "css",
         "javascript",
         "react",
-        "node.js",
         "docker",
         "aws",
         "git"
@@ -88,13 +81,11 @@ def get_skills(text):
 
     text = text.lower()
 
-    found_skills = []
-
-    for skill in skills:
-        if skill.lower() in text:
-            found_skills.append(skill)
-
-    return found_skills
+    return [
+        skill
+        for skill in skills
+        if skill in text
+    ]
 
 
 def calculate_skill_match(resume_text, job_description):
@@ -110,10 +101,10 @@ def calculate_skill_match(resume_text, job_description):
         else:
             missing.append(skill)
 
-    if len(job_skills) > 0:
-        score = (len(matched) / len(job_skills)) * 100
-    else:
+    if len(job_skills) == 0:
         score = 0
+    else:
+        score = (len(matched) / len(job_skills)) * 100
 
     return round(score, 2), matched, missing
 
@@ -123,10 +114,23 @@ def semantic_similarity(resume_text, job_description):
         [resume_text, job_description]
     )
 
-    similarity = cosine_similarity(
-        [embeddings[0]],
-        [embeddings[1]]
-    )[0][0]
+    resume_vector = embeddings[0]
+    job_vector = embeddings[1]
+
+    dot_product = np.dot(
+        resume_vector,
+        job_vector
+    )
+
+    resume_norm = np.linalg.norm(resume_vector)
+    job_norm = np.linalg.norm(job_vector)
+
+    if resume_norm == 0 or job_norm == 0:
+        return 0
+
+    similarity = dot_product / (
+        resume_norm * job_norm
+    )
 
     return round(float(similarity) * 100, 2)
 
@@ -140,113 +144,142 @@ def get_status(score):
         return "BAD"
 
 
-def get_suggestions(missing_skills, final_score):
+def get_suggestions(score, missing_skills):
     suggestions = []
 
-    if final_score < 40:
-        suggestions.append(
-            "Your resume needs significant improvement for this job."
-        )
-
-    elif final_score < 70:
-        suggestions.append(
-            "Your resume partially matches the job description."
-        )
-
-    else:
+    if score >= 70:
         suggestions.append(
             "Your resume is a good match for this job."
         )
 
+    elif score >= 40:
+        suggestions.append(
+            "Your resume partially matches this job."
+        )
+
+    else:
+        suggestions.append(
+            "Your resume needs improvement for this job."
+        )
+
     if missing_skills:
         suggestions.append(
-            "Add these skills if you actually know them: " +
-            ", ".join(missing_skills)
+            "Add these skills only if you actually have them: "
+            + ", ".join(missing_skills)
         )
 
     return suggestions
 
 
-@app.post("/screen")
-async def screen_resume(
-    resume: UploadFile = File(...),
-    job_description: str = Form(...)
-):
+uploaded_file = st.file_uploader(
+    "Upload Resume",
+    type=["pdf", "docx"]
+)
 
-    if not resume.filename:
-        raise HTTPException(
-            status_code=400,
-            detail="Please upload a resume"
-        )
+job_description = st.text_area(
+    "Enter Job Description",
+    height=200
+)
 
-    if not resume.filename.lower().endswith(
-        (".pdf", ".docx")
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Only PDF and DOCX files are allowed"
-        )
 
-    suffix = os.path.splitext(resume.filename)[1]
+if uploaded_file is None:
+    st.info("Please upload your resume.")
 
-    temp_file = tempfile.NamedTemporaryFile(
+elif not job_description.strip():
+    st.warning("Please enter the job description.")
+
+else:
+    suffix = os.path.splitext(uploaded_file.name)[1]
+
+    with tempfile.NamedTemporaryFile(
         delete=False,
         suffix=suffix
-    )
-
-    file_path = temp_file.name
-    temp_file.close()
+    ) as temp_file:
+        temp_file.write(uploaded_file.getvalue())
+        file_path = temp_file.name
 
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(resume.file, buffer)
-
         resume_text = extract_resume(file_path)
 
         if not resume_text.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Could not extract text from resume"
-            )
+            st.error("Could not extract text from the resume.")
 
-        semantic_score = semantic_similarity(
-            resume_text,
-            job_description
-        )
-
-        skill_score, matched_skills, missing_skills = (
-            calculate_skill_match(
+        else:
+            semantic_score = semantic_similarity(
                 resume_text,
                 job_description
             )
-        )
 
-        final_score = round(
-            (semantic_score * 0.6) +
-            (skill_score * 0.4),
-            2
-        )
+            skill_score, matched, missing = (
+                calculate_skill_match(
+                    resume_text,
+                    job_description
+                )
+            )
 
-        status = get_status(final_score)
+            final_score = round(
+                (semantic_score * 0.6) +
+                (skill_score * 0.4),
+                2
+            )
 
-        suggestions = get_suggestions(
-            missing_skills,
-            final_score
-        )
+            status = get_status(final_score)
 
-        return {
-            "candidate": resume.filename,
-            "resume_score": final_score,
-            "status": status,
-            "semantic_score": semantic_score,
-            "skill_score": skill_score,
-            "matched_skills": matched_skills,
-            "missing_skills": missing_skills,
-            "suggestions": suggestions
-        }
+            suggestions = get_suggestions(
+                final_score,
+                missing
+            )
+
+            st.subheader("Resume Analysis")
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Resume Score",
+                f"{final_score}%"
+            )
+
+            col2.metric(
+                "Semantic Match",
+                f"{semantic_score}%"
+            )
+
+            col3.metric(
+                "Skill Match",
+                f"{skill_score}%"
+            )
+
+            if status == "GOOD":
+                st.success(f"Result: {status}")
+
+            elif status == "AVERAGE":
+                st.warning(f"Result: {status}")
+
+            else:
+                st.error(f"Result: {status}")
+
+            st.subheader("Matched Skills")
+
+            if matched:
+                st.write(", ".join(matched))
+            else:
+                st.write("No matching skills found.")
+
+            st.subheader("Missing Skills")
+
+            if missing:
+                st.write(", ".join(missing))
+            else:
+                st.success("No important skills are missing.")
+
+            st.subheader("Suggestions")
+
+            for suggestion in suggestions:
+                st.write("• " + suggestion)
+
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
 
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
-
-        await resume.close()
