@@ -1,120 +1,155 @@
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from pypdf import PdfReader
 from docx import Document
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-import shutil
 import os
+import shutil
 import tempfile
-import re
 
-app = FastAPI(title="AI Resume Screener")
+app = FastAPI()
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def extract_pdf(path):
-    return "\n".join(
-        page.extract_text() or ""
-        for page in PdfReader(path).pages
-    )
+    reader = PdfReader(path)
+    text = ""
+
+    for page in reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
+
+    return text
 
 
 def extract_docx(path):
-    return "\n".join(
-        p.text for p in Document(path).paragraphs
-    )
+    document = Document(path)
+    text = ""
+
+    for paragraph in document.paragraphs:
+        text += paragraph.text + "\n"
+
+    return text
 
 
 def extract_resume(path):
-    ext = os.path.splitext(path)[1].lower()
-
-    if ext == ".pdf":
+    if path.lower().endswith(".pdf"):
         return extract_pdf(path)
 
-    if ext == ".docx":
+    elif path.lower().endswith(".docx"):
         return extract_docx(path)
 
-    raise ValueError("Only PDF and DOCX files are supported")
+    else:
+        raise ValueError("Only PDF and DOCX files are supported")
 
 
-def semantic_similarity(resume, job_description):
-    vectors = model.encode([resume, job_description])
+def get_skills(text):
+    skills = [
+        "python",
+        "java",
+        "c++",
+        "sql",
+        "mysql",
+        "mongodb",
+        "machine learning",
+        "deep learning",
+        "data analysis",
+        "data science",
+        "pandas",
+        "numpy",
+        "tensorflow",
+        "pytorch",
+        "fastapi",
+        "django",
+        "flask",
+        "html",
+        "css",
+        "javascript",
+        "react",
+        "node.js",
+        "docker",
+        "aws",
+        "git"
+    ]
 
-    score = cosine_similarity(
-        [vectors[0]],
-        [vectors[1]]
-    )[0][0]
+    text = text.lower()
 
-    return round(float(score) * 100, 2)
+    found_skills = []
 
+    for skill in skills:
+        if skill.lower() in text:
+            found_skills.append(skill)
 
-def extract_keywords(text):
-    words = re.findall(r"\b[a-zA-Z][a-zA-Z+#.]{2,}\b", text.lower())
-
-    stop_words = {
-        "and", "the", "with", "for", "are", "this",
-        "that", "from", "have", "will", "you", "your",
-        "our", "job", "role", "work", "team", "years",
-        "experience", "candidate", "required", "skills"
-    }
-
-    return list(set(
-        word for word in words
-        if word not in stop_words
-    ))
+    return found_skills
 
 
 def calculate_skill_match(resume_text, job_description):
-    resume_words = set(extract_keywords(resume_text))
-    job_words = set(extract_keywords(job_description))
+    resume_skills = get_skills(resume_text)
+    job_skills = get_skills(job_description)
 
-    matched = resume_words.intersection(job_words)
-    missing = job_words - resume_words
+    matched = []
+    missing = []
 
-    if job_words:
-        score = (len(matched) / len(job_words)) * 100
+    for skill in job_skills:
+        if skill in resume_skills:
+            matched.append(skill)
+        else:
+            missing.append(skill)
+
+    if len(job_skills) > 0:
+        score = (len(matched) / len(job_skills)) * 100
     else:
         score = 0
 
-    return round(score, 2), sorted(matched), sorted(missing)
+    return round(score, 2), matched, missing
 
 
-def get_resume_status(score):
-    if score >= 75:
+def semantic_similarity(resume_text, job_description):
+    embeddings = model.encode(
+        [resume_text, job_description]
+    )
+
+    similarity = cosine_similarity(
+        [embeddings[0]],
+        [embeddings[1]]
+    )[0][0]
+
+    return round(float(similarity) * 100, 2)
+
+
+def get_status(score):
+    if score >= 70:
         return "GOOD"
-    elif score >= 50:
+    elif score >= 40:
         return "AVERAGE"
-    return "BAD"
+    else:
+        return "BAD"
 
 
-def get_suggestions(
-    semantic_score,
-    skill_score,
-    missing_skills
-):
+def get_suggestions(missing_skills, final_score):
     suggestions = []
 
-    if semantic_score < 50:
+    if final_score < 40:
         suggestions.append(
-            "Resume content does not match the job description well. "
-            "Add more relevant experience and responsibilities."
+            "Your resume needs significant improvement for this job."
         )
 
-    if skill_score < 50:
+    elif final_score < 70:
         suggestions.append(
-            "Add relevant skills mentioned in the job description."
+            "Your resume partially matches the job description."
+        )
+
+    else:
+        suggestions.append(
+            "Your resume is a good match for this job."
         )
 
     if missing_skills:
         suggestions.append(
-            "Consider adding these relevant keywords if you have "
-            "experience with them: " +
-            ", ".join(missing_skills[:10])
-        )
-
-    if semantic_score >= 75 and skill_score >= 60:
-        suggestions.append(
-            "Your resume matches the job description well."
+            "Add these skills if you actually know them: " +
+            ", ".join(missing_skills)
         )
 
     return suggestions
@@ -125,33 +160,43 @@ async def screen_resume(
     resume: UploadFile = File(...),
     job_description: str = Form(...)
 ):
+
+    if not resume.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a resume"
+        )
+
     if not resume.filename.lower().endswith(
         (".pdf", ".docx")
     ):
         raise HTTPException(
             status_code=400,
-            detail="Only PDF and DOCX files are supported"
+            detail="Only PDF and DOCX files are allowed"
         )
 
     suffix = os.path.splitext(resume.filename)[1]
 
-    with tempfile.NamedTemporaryFile(
+    temp_file = tempfile.NamedTemporaryFile(
         delete=False,
         suffix=suffix
-    ) as temp:
-        file_path = temp.name
-        shutil.copyfileobj(resume.file, temp)
+    )
+
+    file_path = temp_file.name
+    temp_file.close()
 
     try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(resume.file, buffer)
+
         resume_text = extract_resume(file_path)
 
         if not resume_text.strip():
             raise HTTPException(
                 status_code=400,
-                detail="No text found in resume"
+                detail="Could not extract text from resume"
             )
 
-        # Compare resume with job description
         semantic_score = semantic_similarity(
             resume_text,
             job_description
@@ -164,36 +209,27 @@ async def screen_resume(
             )
         )
 
-        # Final score
         final_score = round(
-            semantic_score * 0.6 +
-            skill_score * 0.4,
+            (semantic_score * 0.6) +
+            (skill_score * 0.4),
             2
         )
 
-        status = get_resume_status(final_score)
+        status = get_status(final_score)
 
         suggestions = get_suggestions(
-            semantic_score,
-            skill_score,
-            missing_skills
+            missing_skills,
+            final_score
         )
 
         return {
             "candidate": resume.filename,
-
             "resume_score": final_score,
-
             "status": status,
-
-            "semantic_match": semantic_score,
-
-            "keyword_match": skill_score,
-
-            "matched_keywords": matched_skills[:20],
-
-            "missing_keywords": missing_skills[:20],
-
+            "semantic_score": semantic_score,
+            "skill_score": skill_score,
+            "matched_skills": matched_skills,
+            "missing_skills": missing_skills,
             "suggestions": suggestions
         }
 
