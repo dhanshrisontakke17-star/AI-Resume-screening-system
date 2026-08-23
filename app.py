@@ -1,30 +1,23 @@
 import streamlit as st
 from pypdf import PdfReader
 from docx import Document
-from sentence_transformers import SentenceTransformer
-import numpy as np
-import os
-import tempfile
-
+import re
 
 st.set_page_config(
     page_title="AI Resume Screening System",
+    page_icon="📄",
     layout="wide"
 )
 
-st.title("AI Resume Screening System")
-
-# Load model
-@st.cache_resource
-def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+st.title("🤖 AI Resume Screening System")
+st.write("Upload your resume and get a detailed resume analysis.")
 
 
-model = load_model()
-
-
-def extract_pdf(path):
-    reader = PdfReader(path)
+# -----------------------------
+# EXTRACT TEXT FROM PDF
+# -----------------------------
+def extract_pdf(uploaded_file):
+    reader = PdfReader(uploaded_file)
     text = ""
 
     for page in reader.pages:
@@ -33,8 +26,11 @@ def extract_pdf(path):
     return text
 
 
-def extract_docx(path):
-    document = Document(path)
+# -----------------------------
+# EXTRACT TEXT FROM DOCX
+# -----------------------------
+def extract_docx(uploaded_file):
+    document = Document(uploaded_file)
 
     return "\n".join(
         paragraph.text
@@ -42,244 +38,540 @@ def extract_docx(path):
     )
 
 
-def extract_resume(path):
-    if path.lower().endswith(".pdf"):
-        return extract_pdf(path)
+# -----------------------------
+# EXTRACT RESUME TEXT
+# -----------------------------
+def extract_resume(uploaded_file):
+    if uploaded_file.name.lower().endswith(".pdf"):
+        return extract_pdf(uploaded_file)
 
-    elif path.lower().endswith(".docx"):
-        return extract_docx(path)
+    if uploaded_file.name.lower().endswith(".docx"):
+        return extract_docx(uploaded_file)
 
     return ""
 
 
-def get_skills(text):
-    skills = [
-        "python",
-        "java",
-        "sql",
-        "mysql",
-        "mongodb",
-        "machine learning",
-        "deep learning",
-        "data analysis",
-        "data science",
-        "pandas",
-        "numpy",
-        "tensorflow",
-        "pytorch",
-        "fastapi",
-        "django",
-        "flask",
-        "html",
-        "css",
-        "javascript",
-        "react",
-        "docker",
-        "aws",
-        "git"
-    ]
+# -----------------------------
+# CHECK CONTACT DETAILS
+# -----------------------------
+def check_email(text):
+    pattern = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+    return bool(re.search(pattern, text))
 
+
+def check_phone(text):
+    pattern = r"(\+91[\s-]?)?[6-9]\d{9}"
+    return bool(re.search(pattern, text))
+
+
+def check_linkedin(text):
+    return "linkedin.com" in text.lower()
+
+
+def check_github(text):
+    return "github.com" in text.lower()
+
+
+# -----------------------------
+# CHECK RESUME SECTIONS
+# -----------------------------
+def check_section(text, keywords):
     text = text.lower()
 
-    return [
+    return any(
+        keyword in text
+        for keyword in keywords
+    )
+
+
+# -----------------------------
+# SKILLS DATABASE
+# -----------------------------
+SKILLS = [
+    "python",
+    "java",
+    "c++",
+    "c",
+    "sql",
+    "mysql",
+    "postgresql",
+    "mongodb",
+    "machine learning",
+    "deep learning",
+    "data science",
+    "data analysis",
+    "artificial intelligence",
+    "numpy",
+    "pandas",
+    "tensorflow",
+    "pytorch",
+    "scikit-learn",
+    "fastapi",
+    "flask",
+    "django",
+    "html",
+    "css",
+    "javascript",
+    "react",
+    "node.js",
+    "docker",
+    "aws",
+    "azure",
+    "git",
+    "github",
+    "power bi",
+    "tableau",
+    "excel"
+]
+
+
+# -----------------------------
+# FIND SKILLS
+# -----------------------------
+def find_skills(text):
+    text = text.lower()
+    found = []
+
+    for skill in SKILLS:
+        if skill in text:
+            found.append(skill)
+
+    return found
+
+
+# -----------------------------
+# JOB DESCRIPTION ANALYSIS
+# -----------------------------
+def analyse_job_match(resume_text, job_description):
+    resume_skills = find_skills(resume_text)
+    job_skills = find_skills(job_description)
+
+    matched = [
         skill
-        for skill in skills
-        if skill in text
+        for skill in job_skills
+        if skill in resume_skills
     ]
 
-
-def calculate_skill_match(resume_text, job_description):
-    resume_skills = get_skills(resume_text)
-    job_skills = get_skills(job_description)
-
-    matched = []
-    missing = []
-
-    for skill in job_skills:
-        if skill in resume_skills:
-            matched.append(skill)
-        else:
-            missing.append(skill)
+    missing = [
+        skill
+        for skill in job_skills
+        if skill not in resume_skills
+    ]
 
     if len(job_skills) == 0:
         score = 0
     else:
-        score = (len(matched) / len(job_skills)) * 100
+        score = round(
+            len(matched) / len(job_skills) * 100,
+            2
+        )
 
-    return round(score, 2), matched, missing
-
-
-def semantic_similarity(resume_text, job_description):
-    embeddings = model.encode(
-        [resume_text, job_description]
-    )
-
-    resume_vector = embeddings[0]
-    job_vector = embeddings[1]
-
-    dot_product = np.dot(
-        resume_vector,
-        job_vector
-    )
-
-    resume_norm = np.linalg.norm(resume_vector)
-    job_norm = np.linalg.norm(job_vector)
-
-    if resume_norm == 0 or job_norm == 0:
-        return 0
-
-    similarity = dot_product / (
-        resume_norm * job_norm
-    )
-
-    return round(float(similarity) * 100, 2)
+    return score, matched, missing
 
 
-def get_status(score):
-    if score >= 70:
-        return "GOOD"
-    elif score >= 40:
-        return "AVERAGE"
-    else:
-        return "BAD"
-
-
-def get_suggestions(score, missing_skills):
+# -----------------------------
+# MAIN RESUME ANALYSIS
+# -----------------------------
+def analyse_resume(text):
+    text_lower = text.lower()
+    score = 0
+    results = {}
     suggestions = []
 
-    if score >= 70:
-        suggestions.append(
-            "Your resume is a good match for this job."
-        )
-
-    elif score >= 40:
-        suggestions.append(
-            "Your resume partially matches this job."
-        )
-
+    # Email
+    results["Email"] = check_email(text)
+    if results["Email"]:
+        score += 5
     else:
         suggestions.append(
-            "Your resume needs improvement for this job."
+            "Add a professional email address."
         )
 
-    if missing_skills:
+    # Phone
+    results["Phone"] = check_phone(text)
+    if results["Phone"]:
+        score += 5
+    else:
         suggestions.append(
-            "Add these skills only if you actually have them: "
-            + ", ".join(missing_skills)
+            "Add a valid phone number."
         )
 
-    return suggestions
+    # LinkedIn
+    results["LinkedIn"] = check_linkedin(text)
+    if results["LinkedIn"]:
+        score += 5
+    else:
+        suggestions.append(
+            "Add your LinkedIn profile URL."
+        )
+
+    # GitHub
+    results["GitHub"] = check_github(text)
+    if results["GitHub"]:
+        score += 5
+    else:
+        suggestions.append(
+            "Add your GitHub profile if you have technical projects."
+        )
+
+    # Summary
+    results["Professional Summary"] = check_section(
+        text_lower,
+        ["summary", "professional summary", "profile", "objective"]
+    )
+
+    if results["Professional Summary"]:
+        score += 10
+    else:
+        suggestions.append(
+            "Add a professional summary or career objective."
+        )
+
+    # Education
+    results["Education"] = check_section(
+        text_lower,
+        ["education", "university", "college", "bachelor", "master"]
+    )
+
+    if results["Education"]:
+        score += 10
+    else:
+        suggestions.append(
+            "Add your education details."
+        )
+
+    # Experience
+    results["Experience"] = check_section(
+        text_lower,
+        ["experience", "work experience", "internship", "employment"]
+    )
+
+    if results["Experience"]:
+        score += 15
+    else:
+        suggestions.append(
+            "Add internship or work experience."
+        )
+
+    # Projects
+    results["Projects"] = check_section(
+        text_lower,
+        ["project", "projects", "academic project"]
+    )
+
+    if results["Projects"]:
+        score += 15
+    else:
+        suggestions.append(
+            "Add relevant projects with technologies and outcomes."
+        )
+
+    # Skills
+    detected_skills = find_skills(text)
+
+    results["Skills"] = detected_skills
+
+    if len(detected_skills) >= 8:
+        score += 15
+    elif len(detected_skills) >= 4:
+        score += 10
+    elif len(detected_skills) > 0:
+        score += 5
+    else:
+        suggestions.append(
+            "Add a dedicated technical skills section."
+        )
+
+    # Certifications
+    results["Certifications"] = check_section(
+        text_lower,
+        ["certification", "certifications", "certificate"]
+    )
+
+    if results["Certifications"]:
+        score += 5
+    else:
+        suggestions.append(
+            "Add relevant certifications if available."
+        )
+
+    # Resume length
+    word_count = len(text.split())
+    results["Word Count"] = word_count
+
+    if 300 <= word_count <= 1200:
+        score += 10
+    elif word_count < 300:
+        suggestions.append(
+            "Your resume may be too short. Add more relevant details."
+        )
+    else:
+        suggestions.append(
+            "Your resume may be too long. Keep it concise."
+        )
+
+    # Action words
+    action_words = [
+        "developed",
+        "created",
+        "designed",
+        "implemented",
+        "improved",
+        "managed",
+        "built",
+        "analysed",
+        "analyzed",
+        "led"
+    ]
+
+    action_count = sum(
+        1
+        for word in action_words
+        if word in text_lower
+    )
+
+    results["Action Words"] = action_count
+
+    if action_count >= 3:
+        score += 5
+    else:
+        suggestions.append(
+            "Use stronger action words such as Developed, Built, "
+            "Implemented, Designed, or Improved."
+        )
+
+    return min(score, 100), results, suggestions
 
 
+# -----------------------------
+# STATUS
+# -----------------------------
+def get_status(score):
+    if score >= 80:
+        return "EXCELLENT"
+    elif score >= 65:
+        return "GOOD"
+    elif score >= 45:
+        return "AVERAGE"
+    return "POOR"
+
+
+# -----------------------------
+# USER INTERFACE
+# -----------------------------
 uploaded_file = st.file_uploader(
-    "Upload Resume",
+    "📤 Upload Resume",
     type=["pdf", "docx"]
 )
 
 job_description = st.text_area(
-    "Enter Job Description",
+    "💼 Paste Job Description (Optional)",
+    placeholder="Paste the complete job description here...",
     height=200
 )
 
 
 if uploaded_file is None:
-    st.info("Please upload your resume.")
-
-elif not job_description.strip():
-    st.warning("Please enter the job description.")
+    st.info("👆 Please upload your resume to start analysis.")
 
 else:
-    suffix = os.path.splitext(uploaded_file.name)[1]
-
-    with tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=suffix
-    ) as temp_file:
-        temp_file.write(uploaded_file.getvalue())
-        file_path = temp_file.name
-
     try:
-        resume_text = extract_resume(file_path)
+        resume_text = extract_resume(uploaded_file)
 
         if not resume_text.strip():
-            st.error("Could not extract text from the resume.")
+            st.error(
+                "Could not extract text from this resume."
+            )
 
         else:
-            semantic_score = semantic_similarity(
-                resume_text,
-                job_description
+            resume_score, results, suggestions = (
+                analyse_resume(resume_text)
             )
 
-            skill_score, matched, missing = (
-                calculate_skill_match(
-                    resume_text,
-                    job_description
+            # Job description score
+            if job_description.strip():
+                job_score, matched, missing = (
+                    analyse_job_match(
+                        resume_text,
+                        job_description
+                    )
                 )
-            )
 
-            final_score = round(
-                (semantic_score * 0.6) +
-                (skill_score * 0.4),
-                2
-            )
+                # Final combined score
+                final_score = round(
+                    resume_score * 0.6 +
+                    job_score * 0.4
+                )
+
+            else:
+                job_score = None
+                matched = []
+                missing = []
+                final_score = resume_score
 
             status = get_status(final_score)
 
-            suggestions = get_suggestions(
-                final_score,
-                missing
-            )
+            # -----------------------------
+            # SCORE DISPLAY
+            # -----------------------------
+            st.divider()
 
-            st.subheader("Resume Analysis")
+            st.subheader("📊 Resume Score")
 
             col1, col2, col3 = st.columns(3)
 
             col1.metric(
-                "Resume Score",
-                f"{final_score}%"
+                "Overall Score",
+                f"{final_score}/100"
             )
 
             col2.metric(
-                "Semantic Match",
-                f"{semantic_score}%"
+                "Resume Quality",
+                f"{resume_score}/100"
             )
 
-            col3.metric(
-                "Skill Match",
-                f"{skill_score}%"
-            )
+            if job_score is not None:
+                col3.metric(
+                    "Job Match",
+                    f"{job_score}%"
+                )
+            else:
+                col3.metric(
+                    "Job Match",
+                    "Not Provided"
+                )
 
-            if status == "GOOD":
-                st.success(f"Result: {status}")
+            st.progress(final_score / 100)
+
+            # -----------------------------
+            # STATUS
+            # -----------------------------
+            if status == "EXCELLENT":
+                st.success(
+                    "🌟 EXCELLENT RESUME"
+                )
+
+            elif status == "GOOD":
+                st.success(
+                    "✅ GOOD RESUME"
+                )
 
             elif status == "AVERAGE":
-                st.warning(f"Result: {status}")
+                st.warning(
+                    "🟡 AVERAGE RESUME"
+                )
 
             else:
-                st.error(f"Result: {status}")
+                st.error(
+                    "❌ POOR RESUME - NEEDS IMPROVEMENT"
+                )
 
-            st.subheader("Matched Skills")
+            # -----------------------------
+            # RESUME CHECKLIST
+            # -----------------------------
+            st.divider()
+            st.subheader("🔍 Resume Analysis")
 
-            if matched:
-                st.write(", ".join(matched))
+            analysis_columns = st.columns(2)
+
+            items = [
+                "Email",
+                "Phone",
+                "LinkedIn",
+                "GitHub",
+                "Professional Summary",
+                "Education",
+                "Experience",
+                "Projects",
+                "Certifications"
+            ]
+
+            for index, item in enumerate(items):
+                column = analysis_columns[index % 2]
+
+                if results[item]:
+                    column.success(f"✅ {item} Found")
+                else:
+                    column.error(f"❌ {item} Missing")
+
+            # -----------------------------
+            # SKILLS
+            # -----------------------------
+            st.divider()
+            st.subheader("🛠️ Skills Detected")
+
+            if results["Skills"]:
+                st.write(", ".join(results["Skills"]))
             else:
-                st.write("No matching skills found.")
+                st.warning("No known technical skills detected.")
 
-            st.subheader("Missing Skills")
+            st.write(
+                f"**Resume Word Count:** "
+                f"{results['Word Count']}"
+            )
+
+            st.write(
+                f"**Action Words Found:** "
+                f"{results['Action Words']}"
+            )
+
+            # -----------------------------
+            # JOB MATCH
+            # -----------------------------
+            if job_description.strip():
+                st.divider()
+                st.subheader("💼 Job Description Match")
+
+                left, right = st.columns(2)
+
+                with left:
+                    st.success("✅ Matched Skills")
+
+                    if matched:
+                        for skill in matched:
+                            st.write(f"• {skill}")
+                    else:
+                        st.write(
+                            "No major skills matched."
+                        )
+
+                with right:
+                    st.error("❌ Missing Skills")
+
+                    if missing:
+                        for skill in missing:
+                            st.write(f"• {skill}")
+                    else:
+                        st.write(
+                            "No major skills are missing."
+                        )
+
+            # -----------------------------
+            # SUGGESTIONS
+            # -----------------------------
+            st.divider()
+            st.subheader("💡 Recommended Changes")
 
             if missing:
-                st.write(", ".join(missing))
+                suggestions.append(
+                    "For this job, consider adding these skills "
+                    "if you genuinely know them: "
+                    + ", ".join(missing)
+                )
+
+            if suggestions:
+                for suggestion in suggestions:
+                    st.info(f"💡 {suggestion}")
             else:
-                st.success("No important skills are missing.")
+                st.success(
+                    "Your resume looks well structured!"
+                )
 
-            st.subheader("Suggestions")
+            # -----------------------------
+            # EXPANDER
+            # -----------------------------
+            with st.expander("View Extracted Resume Text"):
+                st.text(resume_text)
 
-            for suggestion in suggestions:
-                st.write("• " + suggestion)
-
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
-
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+    except Exception as error:
+        st.error(f"Error while analyzing resume: {error}")
