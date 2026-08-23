@@ -1,4 +1,3 @@
-from pypdf import PdfReader
 from docx import Document
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
